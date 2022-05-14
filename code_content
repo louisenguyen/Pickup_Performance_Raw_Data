@@ -1,0 +1,61 @@
+SELECT
+    order_milestones."created_month",
+    
+    vn_views.hubs_enriched.short_name AS "pickup_province",
+    
+    vn_views.hubs_enriched.name AS "hub_name",
+    
+    CASE
+        WHEN vn_views.order_milestones."legacy_shipper_id" = 158259 THEN 'XB'
+        WHEN vn_views.order_milestones."legacy_shipper_id" = 154159 THEN 'WH'
+        WHEN datalake_core_prod_vn.transactions."instruction" IN ('C2C', 'C2C Pickup') THEN 'C2C'
+        WHEN datalake_core_prod_vn.transactions."instruction" IN ('B2C', 'C2C Dropoff') THEN 'B2C'
+    END AS "order_type",
+    
+    sum(CASE 
+        WHEN vn_views.calendar."working_day" = 0 THEN
+            CASE WHEN date("first_pickup_attempt_datetime") <= date(vn_views.calendar."next_working_day_1") THEN 1
+                ELSE 0 END
+        WHEN vn_views.calendar."working_day" = 1 THEN
+            CASE WHEN date(order_milestones."creation_datetime") >= date('2021-04-01') THEN
+                    CASE
+                        WHEN hour(order_milestones."creation_datetime") < 15 THEN
+                            CASE WHEN date("first_pickup_attempt_datetime") = date(order_milestones."creation_datetime") THEN 1
+                                ELSE 0 END
+                        WHEN hour(order_milestones."creation_datetime") >= 15 THEN 
+                            CASE WHEN date("first_pickup_attempt_datetime") <= date(vn_views.calendar."next_working_day_1") THEN 1
+                                ELSE 0 END
+                    END
+            END        
+    END) AS "MP_pickup_ontime",
+        
+    sum(CASE WHEN vn_views.order_milestones."legacy_shipper_id" = 154159 AND date(first_pickup_attempt_datetime) = date(pickup_datetime) THEN 1 ELSE 0 END) AS "WH_pickup_ontime",
+    
+    sum(CASE WHEN order_milestones.first_pickup_attempt_failure_reason_id in (2556,2559) THEN 1 ELSE 0 END) AS "PNR",
+    
+    sum(CASE WHEN order_milestones.first_pickup_attempt_failure_reason_id in (2554,2550) THEN 1 ELSE 0 END) AS "SL_Closed",
+    
+    sum(CASE WHEN order_milestones.first_pickup_attempt_failure_reason_id is NULL THEN 1 ELSE 0 END) "1st_PU_SCC",
+    
+    sum(CASE WHEN first_pickup_attempt_datetime <> pickup_datetime AND date(first_pickup_attempt_datetime) = date(pickup_datetime) THEN 1 ELSE 0 END) AS "N0_SCC",
+    
+    sum(CASE WHEN first_pickup_attempt_datetime <> pickup_datetime AND date(pickup_datetime) = date(first_pickup_attempt_datetime) + interval '1' day THEN 1 ELSE 0 END) AS "N1_SCC",
+    
+    count(distinct order_milestones.order_id) AS "FM_volume",
+    
+    avg(date_diff('hour',order_milestones."creation_datetime", coalesce("pickup_datetime", "inbound_datetime"))) * 1.0000 / 24 AS "RTS_TTS_LT"
+    
+
+FROM
+    vn_views.order_milestones
+    JOIN vn_views.calendar ON date(vn_views.calendar."date") = date(vn_views.order_milestones."creation_datetime")
+    JOIN datalake_core_prod_vn.transactions ON vn_views.order_milestones."order_id" = datalake_core_prod_vn.transactions."order_id" AND datalake_core_prod_vn.transactions."seq_no" = 1
+    JOIN vn_views.shippers_enriched ON order_milestones.legacy_shipper_id = shippers_enriched.legacy_id
+        AND shippers_enriched.shipper_group = 'Lazada Master Account (ASC)'
+    JOIN vn_views.hubs_enriched ON order_milestones.pickup_hub_id = vn_views.hubs_enriched.id
+
+WHERE TRUE
+    AND date(vn_views.order_milestones."creation_datetime") BETWEEN date_trunc('month', now() - interval '6' month) AND date(now())
+    AND "granular_status" <> 'Cancelled'
+
+GROUP BY 1,2,3,4
